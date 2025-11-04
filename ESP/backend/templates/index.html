@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Protótipo de Avaliação Pós-AVC</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.0/dist/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        .chart-container { width: 45%; margin: 20px; }
+        .dashboard { display: flex; flex-wrap: wrap; justify-content: center; }
+        h1, h2 { color: #333; }
+        #status { font-weight: bold; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Avaliação de Progresso Pós-AVC</h1>
+    <p id="status">Status: Conectando...</p>
+
+    <div class="dashboard">
+        <div class="chart-container">
+            <h2>Distribuição de Peso (kg)</h2>
+            <canvas id="weightChart"></canvas>
+        </div>
+        
+        <div class="chart-container">
+            <h2>IMU Esquerda - Rotação Roll (graus)</h2>
+            <canvas id="imuLeftRollChart"></canvas>
+        </div>
+    </div>
+    
+    <script>
+        const statusElement = document.getElementById('status');
+        
+        // --- Conexão SocketIO ---
+        // Conecta ao namespace usado no Python (/test)
+        const socket = io.connect('http://' + document.domain + ':' + location.port + '/test');
+
+        socket.on('connect', function() {
+            statusElement.textContent = 'Status: Conectado ao Servidor. Aguardando dados do ESP32...';
+            statusElement.style.color = 'green';
+        });
+
+        socket.on('disconnect', function() {
+            statusElement.textContent = 'Status: Desconectado do Servidor.';
+            statusElement.style.color = 'red';
+        });
+
+        socket.on('serial_error', function(msg) {
+            statusElement.textContent = `ERRO SERIAL: ${msg.message}. Verifique a porta e o ESP32.`;
+            statusElement.style.color = 'red';
+        });
+
+        // --- Configuração dos Gráficos (Chart.js) ---
+        const CHART_HISTORY_SIZE = 50;
+        let labels = Array.from({length: CHART_HISTORY_SIZE}, (_, i) => i + 1);
+        let weightLeftData = new Array(CHART_HISTORY_SIZE).fill(0);
+        let weightRightData = new Array(CHART_HISTORY_SIZE).fill(0);
+        let imuLeftRollData = new Array(CHART_HISTORY_SIZE).fill(0);
+        
+        // Gráfico de Peso
+        const weightChartCtx = document.getElementById('weightChart').getContext('2d');
+        const weightChart = new Chart(weightChartCtx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Peso Esquerda (kg)',
+                        data: weightLeftData,
+                        borderColor: 'rgb(75, 192, 192)',
+                        tension: 0.1
+                    },
+                    {
+                        label: 'Peso Direita (kg)',
+                        data: weightRightData,
+                        borderColor: 'rgb(255, 99, 132)',
+                        tension: 0.1
+                    }
+                ]
+            },
+            options: {
+                animation: false,
+                scales: { y: { beginAtZero: true, title: { display: true, text: 'Força (kg)' } } }
+            }
+        });
+
+        // Gráfico de Roll (Exemplo de uma IMU)
+        const imuLeftRollCtx = document.getElementById('imuLeftRollChart').getContext('2d');
+        const imuLeftRollChart = new Chart(imuLeftRollCtx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'Roll Esquerda (graus)',
+                        data: imuLeftRollData,
+                        borderColor: 'rgb(54, 162, 235)',
+                        tension: 0.1
+                    }
+                ]
+            },
+            options: {
+                animation: false,
+                scales: { y: { title: { display: true, text: 'Ângulo (graus)' } } }
+            }
+        });
+
+        // --- Recebimento e Atualização de Dados ---
+        socket.on('sensor_data', function(msg) {
+            statusElement.textContent = 'Status: Recebendo dados em tempo real...';
+            statusElement.style.color = 'blue';
+
+            // 1. Atualiza os dados de peso
+            weightLeftData.shift(); // Remove o primeiro elemento
+            weightLeftData.push(msg.load_left); // Adiciona o novo valor
+            
+            weightRightData.shift();
+            weightRightData.push(msg.load_right);
+
+            weightChart.update();
+
+            // 2. Atualiza os dados da IMU
+            imuLeftRollData.shift();
+            imuLeftRollData.push(msg.imu1_roll);
+
+            imuLeftRollChart.update();
+
+            // Você pode adicionar mais gráficos e lógica de atualização aqui 
+            // para imu1_pitch, imu2_roll, imu2_pitch, etc.
+        });
+    </script>
+</body>
+</html>
