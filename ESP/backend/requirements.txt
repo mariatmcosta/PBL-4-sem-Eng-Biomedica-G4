@@ -1,0 +1,4 @@
+Flask
+Flask-SocketIO
+pyserial
+eventlet # Necessário para o Flask-SocketIO rodar o servidor
