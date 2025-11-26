@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GaitSense</title>
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Sharp" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="{{ url_for('static', filename='images/logo.png') }}" alt="logo" onerror="this.style.display='none'">
+        <h2 class="brand-title">Gait<span class="danger">Sense</span></h2>
+      </div>
+
+      <nav>
+        <a href="{{ url_for('dashboard_page') }}" class="{% if request.path.startswith('/dashboard') %}active{% endif %}">
+          <span class="material-icons-sharp">dashboard</span><span>Dashboard</span>
+        </a>
+        <a href="{{ url_for('patients_page') }}" class="{% if request.path.startswith('/patients') %}active{% endif %}">
+          <span class="material-icons-sharp">person</span><span>Pacientes</span>
+        </a>
+        <a href="#" onclick="logout()" style="margin-top: auto;">
+          <span class="material-icons-sharp">logout</span><span>Logout</span>
+        </a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="top-left">
+          <h1>{{ title }}</h1>
+        </div>
+        <div class="top-right" id="topRight">
+        </div>
+      </header>
+
+      <section class="content">
+        {% block content %}{% endblock %}
+      </section>
+    </main>
+  </div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+<script>
+async function logout(){
+  await fetch('/api/logout', {method:'POST'});
+  window.location.href = '/login';
+}
+</script>
+</body>
+</html>
