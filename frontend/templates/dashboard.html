@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="grid">
+  <div class="card">
+    <h3>Bem-vindo, {{ session.get('username') }}</h3>
+    <p>Use o menu à esquerda para navegar entre pacientes e análises.</p>
+  </div>
+
+  <div class="card">
+    <h3>Upload rápido</h3>
+    <p>Selecione um paciente já cadastrado na página de <a href="{{ url_for('patients_page') }}">Pacientes</a> antes de enviar (para cadastrar um novo paciente, vá para o menu à esquerda).</p>
+    <input type="file" id="quickCsv" accept=".csv">
+    <select id="quickPatient" style="margin-left:8px"><option value="">-- paciente --</option></select>
+    <div style="margin-top:8px">
+      <button id="quickUpload" class="btn-primary">Enviar e Analisar</button>
+      <span id="quickMsg" class="form-message"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+async function dashboardInit(){
+  // populate quick patient select + stats
+  const res = await fetch('/api/patients');
+  if (res.ok){
+    const patients = await res.json();
+    const sel = document.getElementById('quickPatient');
+    sel.innerHTML = '<option value="">-- paciente --</option>';
+    patients.forEach(p=>{
+      const o = document.createElement('option'); o.value=p.id; o.textContent=p.name;
+      sel.appendChild(o);
+    });
+    document.getElementById('statPatients').textContent = patients.length;
+  }
+  // analyses count
+  // naive: count rows in analyses table via patients listing
+  let totalAnalyses = 0;
+  if (res.ok){
+    const patients = await res.json();
+    for (const p of patients){
+      const r = await fetch(`/api/patients/${p.id}/analyses`);
+      if (r.ok){ const arr = await r.json(); totalAnalyses += arr.length; }
+    }
+  }
+  document.getElementById('statAnalyses').textContent = totalAnalyses;
+
+  document.getElementById('quickUpload').onclick = async ()=>{
+    const file = document.getElementById('quickCsv').files[0];
+    const pid = document.getElementById('quickPatient').value;
+    const msg = document.getElementById('quickMsg');
+    msg.textContent = '';
+    if (!file){ msg.textContent = 'Selecione CSV.'; return; }
+    if (!pid){ msg.textContent = 'Selecione paciente.'; return; }
+    const form = new FormData();
+    form.append('file', file);
+    form.append('patient_id', pid);
+    const u = await fetch('/upload', {method:'POST', body: form});
+    if (!u.ok){ msg.textContent = 'Erro no upload.'; return; }
+    msg.textContent = 'Análise concluída.';
+  };
+}
+dashboardInit();
+</script>
+{% endblock %}

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Paciente: {{ patient.name }}</h2>
+  <p>Nasc: {{ patient.dob if patient.dob else '—' }}</p>
+
+  <a href="/patients/{{ patient.id }}/medical-form/new" class="btn-primary" style="margin-top:12px">
+    Criar ficha médica
+  </a>
+
+  <h3 style="margin-top:20px">Fichas médicas</h3>
+
+  {% if medical_forms %}
+    {% for form in medical_forms %}
+      <div class="analysis-row">
+        <div>
+          <strong>Ficha #{{ form.id }}</strong><br>
+          {{ form.form_date if form.form_date else "Sem data" }}
+        </div>
+        <div class="row" style="gap:8px">
+          <a class="btn" href="/patients/{{ patient.id }}/medical-form/{{ form.id }}">Ver</a>
+          <a class="btn-primary" href="/patients/{{ patient.id }}/medical-form/{{ form.id }}/edit">Editar</a>
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p>Nenhuma ficha cadastrada.</p>
+  {% endif %}
+
+  <hr style="margin:20px 0">
+
+  <h3>Enviar novo CSV para análise</h3>
+  <input type="file" id="csvFile" accept=".csv">
+  <button id="btnSend" class="btn-primary">Enviar e Analisar</button>
+  <span id="uploadMsg" class="form-message"></span>
+
+  <div style="margin-top:18px;">
+    <h3>Análises</h3>
+    <div id="analysesList">Carregando...</div>
+  </div>
+</div>
+
+<script>
+    const PATIENT_ID = {{ patient.id }};
+    
+    async function patientInit(){
+      const list = document.getElementById("analysesList");
+      const msg = document.getElementById("uploadMsg");
+    
+      async function reload(){
+        const r = await fetch(`/api/patients/${PATIENT_ID}/analyses`);
+        if (!r.ok){
+          list.textContent = "Erro ao carregar análises.";
+          return;
+        }
+    
+        const arr = await r.json();
+        if (!arr.length){
+          list.innerHTML = "<div>Nenhuma análise</div>";
+          return;
+        }
+    
+        list.innerHTML = "";
+        arr.forEach(a=>{
+          const el = document.createElement("div");
+          el.className = "analysis-row";
+          el.innerHTML = `
+            <div style="display:flex;gap:12px;align-items:center">
+              <img src="/outputs/${a.image_filename}" style="width:240px;border:1px solid #ddd;padding:6px;border-radius:6px;">
+              <div style="flex:1">
+                <div><strong>Data:</strong> ${a.created_at}</div>
+                <div><strong>CSV:</strong> ${a.csv_filename}</div>
+                <div style="margin-top:8px">
+                  <a href="/outputs/${a.image_filename}" target="_blank" class="btn">Abrir</a>
+                  <button data-id="${a.id}" class="btn-danger btnDel">Excluir</button>
+                </div>
+              </div>
+            </div><hr>
+          `;
+          list.appendChild(el);
+        });
+    
+        document.querySelectorAll(".btnDel").forEach(btn=>{
+          btn.onclick = async ()=>{
+            if (!confirm("Excluir análise?")) return;
+            const del = await fetch(`/api/analyses/${btn.dataset.id}`, {method:"DELETE"});
+            if (del.ok) reload();
+          }
+        });
+      }
+    
+      document.getElementById("btnSend").onclick = async ()=>{
+        msg.textContent = "";
+        const file = document.getElementById("csvFile").files[0];
+        if (!file){
+          msg.textContent = "Selecione um arquivo CSV.";
+          return;
+        }
+    
+        const form = new FormData();
+        form.append("file", file);
+        form.append("patient_id", PATIENT_ID);
+    
+        const r = await fetch("/upload", {method:"POST", body:form});
+        const data = await r.json();
+    
+        if (!r.ok){
+          msg.textContent = data.error || "Erro";
+          return;
+        }
+    
+        msg.textContent = "Análise realizada!";
+        reload();
+      };
+    
+      reload();
+    }
+    
+    patientInit();
+    </script>    
+{% endblock %}
