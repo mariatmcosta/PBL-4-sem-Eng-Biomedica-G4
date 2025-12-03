@@ -1,0 +1,191 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt, find_peaks, welch, detrend, savgol_filter
+
+# ========================
+# 1. Leitura do CSV
+# ========================
+# NOTA: Este script assume que o arquivo 'carol_maker.csv' está disponível
+# no mesmo diretório ou que o caminho está correto.
+df = pd.read_csv("paula_maker.csv", parse_dates=['Timestamp'])
+
+# Garante ordem temporal
+df = df.sort_values("Timestamp").reset_index(drop=True)
+
+# ========================
+# 2. Frequência de amostragem (fs)
+# ========================
+dt = df['Timestamp'].diff().dt.total_seconds().mean()
+fs = 1 / dt
+print(f"Frequência de amostragem estimada: {fs:.2f} Hz")
+
+# ========================
+# 3. Seleção dos sinais
+# ========================
+force = df['Peso (kg)'].values
+ankle = df['Dorsiflexao'].values
+
+# ========================
+# 4. Pré-processamento
+# ========================
+
+# Remove tendência (drift)
+force_detrended = detrend(force)
+ankle_detrended = detrend(ankle)
+
+# Suavização (preserva forma do sinal)
+# O número de pontos (21) e o polinômio (3) são parâmetros para o filtro Savitzky-Golay
+force_smoothed = savgol_filter(force_detrended, 21, 3)
+ankle_smoothed = savgol_filter(ankle_detrended, 21, 3)
+
+# Filtro passa-banda típico da marcha (0.3 – 20 Hz)
+lowcut = 0.3
+highcut = fs * 0.45  # margem de segurança abaixo de Nyquist
+
+# Filtro Butterworth de ordem 4
+b, a = butter(4, [lowcut, highcut], btype='band', fs=fs)
+
+force_f = filtfilt(b, a, force_smoothed)
+ankle_f = filtfilt(b, a, ankle_smoothed)
+
+# ========================
+# 5. Detecção de ciclos de marcha (heel strikes)
+# ========================
+# Detecta picos na força filtrada (assumindo que picos correspondem ao heel strike)
+peaks, _ = find_peaks(force_f, height=np.mean(force_f), distance=fs*0.4)
+
+# ========================
+# 6. Derivadas (velocidades angulares e variação de força)
+# ========================
+# Calculadas para análise de FFT/PSD, mesmo que não sejam plotadas diretamente
+force_deriv = np.gradient(force_f, dt)
+ankle_deriv = np.gradient(ankle_f, dt)
+
+# ========================
+# 7. FFT (Transformada de Fourier)
+# ========================
+N = len(force_f)
+freqs = np.fft.rfftfreq(N, d=dt)
+fft_force = np.abs(np.fft.rfft(force_f - np.mean(force_f)))
+fft_ankle = np.abs(np.fft.rfft(ankle_f - np.mean(ankle_f)))
+
+# ========================
+# 8. PSD - Welch (Mantido o cálculo para referência, mas removido o plot)
+# ========================
+f_welch, Pxx = welch(force_f, fs=fs, nperseg=2048)
+
+# ========================
+# 9. Normalização por ciclo (0–100% do passo)
+# ========================
+def normalize_cycles(signal, peaks, n_points=100):
+    cycles = []
+    for i in range(len(peaks)-1):
+        # Segmenta o sinal entre picos consecutivos
+        seg = signal[peaks[i]:peaks[i+1]]
+        x_old = np.linspace(0, 100, len(seg))
+        x_new = np.linspace(0, 100, n_points)
+        # Interpola para 100 pontos
+        cycles.append(np.interp(x_new, x_old, seg))
+    return np.array(cycles)
+
+force_cycles = normalize_cycles(force_f, peaks)
+ankle_cycles = normalize_cycles(ankle_f, peaks)
+
+force_mean = np.mean(force_cycles, axis=0)
+force_std = np.std(force_cycles, axis=0)
+
+ankle_mean = np.mean(ankle_cycles, axis=0)
+ankle_std = np.std(ankle_cycles, axis=0)
+
+# ========================
+# 9.5 Reconstrução do sinal da passada (sinal periódico)
+# ========================
+
+num_passadas = len(peaks) - 1  # quantidade de ciclos detectados
+
+reconstructed_force = np.tile(force_mean, num_passadas)
+reconstructed_ankle = np.tile(ankle_mean, num_passadas)
+
+# Cria eixo de tempo artificial para o sinal reconstruído
+try:
+    # Calcula a duração média do ciclo para a reconstrução
+    cycle_duration = (df['Timestamp'][peaks[1]-1] - df['Timestamp'][peaks[0]]).total_seconds()
+except IndexError:
+    # Fallback se houver poucos picos
+    cycle_duration = 1.0 
+
+t_recon = np.linspace(
+    0,
+    num_passadas * cycle_duration,
+    len(reconstructed_force)
+)
+
+# ========================
+# 10. Estatísticas
+# ========================
+print("\nResumo estatístico:")
+print(f"Força média (filtrada): {np.mean(force_f):.3f}")
+print(f"Força máxima (filtrada): {np.max(force_f):.3f}")
+print(f"Ângulo médio (filtrado): {np.mean(ankle_f):.3f}")
+print(f"Ângulo máximo (filtrado): {np.max(ankle_f):.3f}")
+
+# ========================
+# 11. GRÁFICOS – JANELA ÚNICA (5 PLOTS)
+# ========================
+
+# Subplots ajustados para 5 gráficos
+fig, axs = plt.subplots(5, 1, figsize=(14, 20), sharex=False)
+
+# --- 1) Força Bruta (Dados do Dataset) ---
+axs[0].plot(df['Timestamp'], df['Peso (kg)'].values, label='Força Bruta')
+# Os picos e a força filtrada foram removidos deste gráfico conforme solicitado
+axs[0].set_title('1. Força de Reação do Solo (Dados Brutos do CSV)')
+axs[0].set_ylabel('Peso (kg)')
+axs[0].legend()
+axs[0].tick_params(axis='x', rotation=45)
+
+# --- 2) Ângulo do Tornozelo vs. Tempo (FILTRADO) --- 
+axs[1].plot(df['Timestamp'], ankle_f, 'g-', label='Dorsiflexão filtrada')
+axs[1].set_title('2. Ângulo do Tornozelo (Dorsiflexão) ao longo do Tempo')
+axs[1].set_ylabel('Ângulo (unidade normalizada)')
+axs[1].legend()
+axs[1].tick_params(axis='x', rotation=45)
+
+# --- 3) FFT --- 
+axs[2].plot(freqs, fft_force, label='FFT Força')
+axs[2].plot(freqs, fft_ankle, label='FFT Tornozelo')
+axs[2].set_xlim(0, 15)
+axs[2].set_title('3. Espectro de Frequência (FFT)')
+axs[2].set_xlabel('Frequência (Hz)')
+axs[2].set_ylabel('Magnitude')
+axs[2].legend()
+
+# --- 4) Ciclo médio da marcha --- 
+x = np.linspace(0, 100, len(force_mean))
+
+axs[3].plot(x, force_mean, label='Força média')
+axs[3].fill_between(x, force_mean-force_std, force_mean+force_std, alpha=0.3, label='Desvio Padrão Força')
+
+# Plota o ângulo médio no mesmo gráfico
+axs[3].plot(x, ankle_mean, label='Ângulo médio')
+axs[3].fill_between(x, ankle_mean-ankle_std, ankle_mean+ankle_std, alpha=0.3, label='Desvio Padrão Ângulo')
+
+axs[3].set_title('4. Ciclo Médio Normalizado da Marcha (0-100% do Passo)')
+axs[3].set_xlabel('% do ciclo da marcha')
+axs[3].set_ylabel('Amplitude Normalizada')
+axs[3].legend()
+
+# --- 5) Sinal reconstruído da marcha --- 
+# Ajuste o eixo X para que os sinais de força e ângulo fiquem um sobre o outro (não é o tempo original, mas o tempo reconstruído)
+axs[4].plot(t_recon, reconstructed_force, label='Força reconstruída')
+axs[4].plot(t_recon, reconstructed_ankle, label='Ângulo reconstruído')
+axs[4].set_title('5. Sinal Reconstruído da Passada (Períodos Repetidos do Ciclo Médio)')
+axs[4].set_xlabel('Tempo Artificial (s)')
+axs[4].set_ylabel('Amplitude')
+axs[4].legend()
+
+
+plt.tight_layout()
+plt.savefig("analise_marcha_modificada.png", dpi=300, bbox_inches='tight')
+plt.show()
