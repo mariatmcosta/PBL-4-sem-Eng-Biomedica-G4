@@ -1,0 +1,236 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt, find_peaks, welch, detrend, savgol_filter
+
+# ========================
+# 1. Leitura do CSV
+# ========================
+df = pd.read_csv("rosane_dorsi.csv", parse_dates=['Timestamp'])
+df = df.sort_values("Timestamp").reset_index(drop=True)
+
+# ========================
+# 1.5 REMOÇÃO DE OUTLIERS (Peso)
+# ========================
+Q1 = df['Peso (kg)'].quantile(0.25)
+Q3 = df['Peso (kg)'].quantile(0.75)
+IQR = Q3 - Q1
+lower = Q1 - 1.5 * IQR
+upper = Q3 + 1.5 * IQR
+print(f"Removendo outliers fora do intervalo: {lower:.2f} kg a {upper:.2f} kg")
+
+df.loc[(df['Peso (kg)'] < lower) | (df['Peso (kg)'] > upper), 'Peso (kg)'] = np.nan
+df['Peso (kg)'] = df['Peso (kg)'].interpolate().fillna(method='bfill').fillna(method='ffill')
+
+# ========================
+# 2. Frequência de amostragem (fs)
+# ========================
+# checagens robustas para dt/fs
+dt_series = df['Timestamp'].diff().dt.total_seconds()
+dt = dt_series.mean()
+if np.isnan(dt) or dt == 0:
+    raise ValueError("Delta de tempo inválido (dt é NaN ou zero). Verifique a coluna 'Timestamp' no CSV.")
+fs = 1.0 / dt
+print(f"Frequência de amostragem estimada: {fs:.2f} Hz (dt médio = {dt:.4f} s)")
+
+# ========================
+# 3. Seleção dos sinais
+# ========================
+force = df['Peso (kg)'].values.astype(float)
+ankle = df['Dorsiflexao'].values.astype(float)
+
+# ========================
+# 4. Pré-processamento
+# ========================
+# Segurança extra contra NaN/Inf
+if np.isnan(force).any() or np.isinf(force).any():
+    print("Aviso: NaNs ou Infs encontrados na força. Corrigindo com nan_to_num...")
+    force = np.nan_to_num(force)
+
+if np.isnan(ankle).any() or np.isinf(ankle).any():
+    print("Aviso: NaNs ou Infs encontrados no ângulo. Corrigindo com nan_to_num...")
+    ankle = np.nan_to_num(ankle)
+
+# Remove tendência (drift)
+force_detrended = detrend(force)
+ankle_detrended = detrend(ankle)
+
+# ========================
+# Ajuste seguro para Savitzky-Golay (janela ímpar e <= length-1)
+# ========================
+def safe_savgol(signal, window_length=21, polyorder=3):
+    n = len(signal)
+    if n < 5:
+        # sinal muito curto -> retorna sinal original
+        return signal
+    # garante janela ímpar e <= n-1 (e >= 3)
+    wl = min(window_length, n if n % 2 == 1 else n - 1)
+    if wl < 3:
+        wl = 3
+    if wl % 2 == 0:
+        wl -= 1
+        if wl < 3:
+            wl = 3
+    if wl >= n:
+        wl = n - 2 if (n - 2) % 2 == 1 else n - 3
+        if wl < 3:
+            wl = 3
+    try:
+        return savgol_filter(signal, wl, polyorder)
+    except Exception as e:
+        print(f"Aviso: savgol_filter falhou ({e}); retornando sinal sem suavização.")
+        return signal
+
+force_smoothed = safe_savgol(force_detrended, window_length=21, polyorder=3)
+ankle_smoothed = safe_savgol(ankle_detrended, window_length=21, polyorder=3)
+
+# ========================
+# Filtro passa-baixa fisiológico para GRF
+# ========================
+# escolha de cutoff: 20 Hz é padrão, mas não deve exceder Nyquist (fs/2)
+cutoff = min(20.0, 0.45 * fs)  # seguro: nunca acima de Nyquist margin
+if cutoff <= 0:
+    raise ValueError("Frequência de corte inválida. Verifique fs.")
+b, a = butter(4, cutoff, btype='low', fs=fs)
+
+force_f = filtfilt(b, a, force_smoothed)
+ankle_f = filtfilt(b, a, ankle_smoothed)
+
+# Impor limite físico: GRF não pode ser negativa
+force_f[force_f < 0] = 0
+
+# ========================
+# 5. Detecção de ciclos (verifica se há picos suficientes)
+# ========================
+min_peak_distance = max(1, int(fs * 0.4))  # distância mínima em amostras
+height_thr = np.mean(force_f) if np.isfinite(np.mean(force_f)) else None
+if height_thr is None:
+    height_arg = None
+else:
+    height_arg = {'height': height_thr}
+
+peaks, props = find_peaks(force_f, distance=min_peak_distance, **(height_arg or {}))
+print(f"Picos detectados: {len(peaks)}")
+
+if len(peaks) < 2:
+    raise RuntimeError("Foram detectados menos de 2 picos — impossível normalizar ciclos. Verifique o sinal de força.")
+
+# ========================
+# 6. Derivadas
+# ========================
+force_deriv = np.gradient(force_f, dt)
+ankle_deriv = np.gradient(ankle_f, dt)
+
+# ========================
+# 7. FFT
+# ========================
+N = len(force_f)
+freqs = np.fft.rfftfreq(N, d=dt)
+fft_force = np.abs(np.fft.rfft(force_f - np.mean(force_f)))
+fft_ankle = np.abs(np.fft.rfft(ankle_f - np.mean(ankle_f)))
+
+# ========================
+# 8. Welch
+# ========================
+nperseg = min(2048, N)
+if nperseg < 8:
+    # evita erro no welch
+    f_welch, Pxx = np.array([]), np.array([])
+else:
+    f_welch, Pxx = welch(force_f, fs=fs, nperseg=nperseg)
+
+# ========================
+# 9. Normalização por ciclo
+# ========================
+def normalize_cycles(signal, peaks, n_points=100):
+    cycles = []
+    for i in range(len(peaks)-1):
+        start = peaks[i]
+        end = peaks[i+1]
+        if end - start < 3:
+            continue
+        seg = signal[start:end]
+        x_old = np.linspace(0, 100, len(seg))
+        x_new = np.linspace(0, 100, n_points)
+        cycles.append(np.interp(x_new, x_old, seg))
+    if len(cycles) == 0:
+        raise RuntimeError("Nenhum ciclo válido encontrado para normalização.")
+    return np.array(cycles)
+
+force_cycles = normalize_cycles(force_f, peaks)
+ankle_cycles = normalize_cycles(ankle_f, peaks)
+
+force_mean = np.mean(force_cycles, axis=0)
+force_std = np.std(force_cycles, axis=0)
+
+ankle_mean = np.mean(ankle_cycles, axis=0)
+ankle_std = np.std(ankle_cycles, axis=0)
+
+# ========================
+# 9.5 Reconstrução
+# ========================
+num_passadas = len(peaks) - 1
+reconstructed_force = np.tile(force_mean, num_passadas)
+reconstructed_ankle = np.tile(ankle_mean, num_passadas)
+
+try:
+    cycle_duration = (df['Timestamp'].iloc[peaks[1]-1] - df['Timestamp'].iloc[peaks[0]]).total_seconds()
+except Exception:
+    cycle_duration = (df['Timestamp'].iloc[-1] - df['Timestamp'].iloc[0]).total_seconds() / max(1, num_passadas)
+
+t_recon = np.linspace(0, num_passadas * cycle_duration, len(reconstructed_force))
+
+# ========================
+# 10. Estatísticas
+# ========================
+print("\nResumo estatístico:")
+print(f"Força média (filtrada): {np.mean(force_f):.3f}")
+print(f"Força máxima (filtrada): {np.max(force_f):.3f}")
+print(f"Ângulo médio (filtrado): {np.mean(ankle_f):.3f}")
+print(f"Ângulo máximo (filtrado): {np.max(ankle_f):.3f}")
+
+# ========================
+# 11. GRÁFICOS
+# ========================
+fig, axs = plt.subplots(5, 1, figsize=(14, 20), sharex=False)
+
+axs[0].plot(df['Timestamp'], force_f, label='Força filtrada e sem negativos')
+axs[0].set_title('1. Força de Reação do Solo (Outliers removidos)')
+axs[0].set_ylabel('Peso (kg)')
+axs[0].legend()
+axs[0].tick_params(axis='x', rotation=45)
+
+axs[1].plot(df['Timestamp'], ankle_f, 'g-', label='Dorsiflexão filtrada')
+axs[1].set_title('2. Ângulo do Tornozelo')
+axs[1].set_ylabel('Ângulo')
+axs[1].legend()
+axs[1].tick_params(axis='x', rotation=45)
+
+axs[2].plot(freqs, fft_force, label='FFT Força')
+axs[2].plot(freqs, fft_ankle, label='FFT Tornozelo')
+axs[2].set_xlim(0, min(15, fs/2))
+axs[2].set_title('3. FFT')
+axs[2].set_xlabel('Frequência (Hz)')
+axs[2].set_ylabel('Magnitude')
+axs[2].legend()
+
+x = np.linspace(0, 100, len(force_mean))
+axs[3].plot(x, force_mean, label='Força média')
+axs[3].fill_between(x, force_mean-force_std, force_mean+force_std, alpha=0.3)
+axs[3].plot(x, ankle_mean, label='Ângulo médio')
+axs[3].fill_between(x, ankle_mean-ankle_std, ankle_mean+ankle_std, alpha=0.3)
+axs[3].set_title('4. Ciclo médio da marcha')
+axs[3].set_xlabel('% do ciclo')
+axs[3].set_ylabel('Amplitude')
+axs[3].legend()
+
+axs[4].plot(t_recon, reconstructed_force, label='Força reconstruída')
+axs[4].plot(t_recon, reconstructed_ankle, label='Ângulo reconstruído')
+axs[4].set_title('5. Sinal reconstruído')
+axs[4].set_xlabel('Tempo (s)')
+axs[4].set_ylabel('Amplitude')
+axs[4].legend()
+
+plt.tight_layout()
+plt.savefig("analise_marcha_modificada.png", dpi=300, bbox_inches='tight')
+plt.show()
