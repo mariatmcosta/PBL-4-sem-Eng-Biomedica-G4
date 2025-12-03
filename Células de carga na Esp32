@@ -1,0 +1,44 @@
+#include <HX711_ADC.h>
+#include <EEPROM.h>
+
+const int HX711_dout = 4;  // DOUT
+const int HX711_sck  = 5;  // SCK
+
+HX711_ADC LoadCell(HX711_dout, HX711_sck);
+
+float calibrationValue = 696.0; // ajuste conforme sua calibração
+unsigned long t = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(10);
+  Serial.println("Iniciando HX711 com duas células em paralelo...");
+
+  LoadCell.begin();
+  LoadCell.startMultiple(2000, true);
+  LoadCell.setCalFactor(calibrationValue);
+  Serial.println("Tara completa. Sistema pronto.");
+}
+
+void loop() {
+  static boolean newDataReady = 0;
+  const int serialPrintInterval = 500;
+
+  if (LoadCell.update()) newDataReady = true;
+
+  if (newDataReady && millis() > t + serialPrintInterval) {
+    float peso = LoadCell.getData();
+    Serial.print("Peso total: ");
+    Serial.print(peso);
+    Serial.println(" g");
+    newDataReady = 0;
+    t = millis();
+  }
+
+  if (Serial.available() > 0) {
+    char inByte = Serial.read();
+    if (inByte == 't') LoadCell.tareNoDelay();
+  }
+
+  if (LoadCell.getTareStatus()) Serial.println("Tara concluída!");
+}
