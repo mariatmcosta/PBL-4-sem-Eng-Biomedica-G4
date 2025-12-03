@@ -1,0 +1,141 @@
+#include <WiFi.h>
+#include <Wire.h>
+#include <FastIMU.h>
+#include <HX711_ADC.h>
+
+// ---------- CONFIG Wi-Fi ----------
+const char* ssid = "iPhone de Pedro";
+const char* password = "090903ph";
+
+WiFiServer server(12345);
+
+// ---------- CONFIG HX711 (Única Célula) ----------
+const int HX711_dout = 4;
+const int HX711_sck  = 5;
+HX711_ADC LoadCell(HX711_dout, HX711_sck);
+
+float calibrationValue = 696.0; 
+
+// ---------- CONFIG IMUs ----------
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+// Usando MPU9250 para ter magnetômetro
+MPU9250 imu1;
+MPU9250 imu2;
+
+calData calib = {0};
+AccelData accelData;
+MagData magData;
+GyroData gyroData; 
+
+// ---------- SETUP ----------
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // 1. Conexão Wi-Fi
+  Serial.println("Conectando ao WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi Conectado!");
+  Serial.print("IP do ESP32: ");
+  Serial.println(WiFi.localIP());
+
+  // 2. Iniciar Servidor TCP
+  server.begin();
+  Serial.println("Servidor TCP iniciado na porta 12345");
+
+  // 3. Inicializar IMUs
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000); 
+
+  Serial.println("Inicializando IMUs...");
+  if (imu1.init(calib, 0x68) != 0) {
+    Serial.println("Erro IMU 1 (0x68)");
+  }
+  if (imu2.init(calib, 0x69) != 0) {
+    Serial.println("Erro IMU 2 (0x69)");
+  }
+  Serial.println("IMUs prontas!");
+
+  // 4. Inicializar Célula de Carga
+  Serial.println("Inicializando Célula de Carga...");
+  
+  LoadCell.begin();
+  LoadCell.startMultiple(2000, true);
+  LoadCell.setCalFactor(calibrationValue);
+  
+  Serial.println("Hardware pronto. Aguardando cliente Python...");
+}
+
+// ---------- LOOP ----------
+void loop() {
+  WiFiClient client = server.available();
+
+  if (client) {
+    Serial.println("Cliente Python conectado!");
+
+    while (client.connected()) {
+      
+      // ----- Verifica comandos recebidos -----
+    if (client.available()) {
+      String comando = client.readStringUntil('\n');
+      comando.trim();
+
+      if (comando == "TARE") {
+        LoadCell.tareNoDelay();
+        client.println("OK TARA EXECUTADA");
+      }
+    }
+
+      // 1. Leitura da Célula de Carga
+      LoadCell.update();
+      float peso = LoadCell.getData();
+
+      // 2. Leitura IMU 1
+      imu1.update();
+      imu1.getAccel(&accelData);
+      imu1.getMag(&magData);
+      
+      String dadosImu1 = "Sensor 1 acel x=" + String(accelData.accelX) + 
+                         " y=" + String(accelData.accelY) + 
+                         " z=" + String(accelData.accelZ) +
+                         " mag x=" + String(magData.magX) + 
+                         " y=" + String(magData.magY) + 
+                         " z=" + String(magData.magZ);
+
+      // 3. Leitura IMU 2
+      imu2.update();
+      imu2.getAccel(&accelData);
+      imu2.getMag(&magData);
+
+      String dadosImu2 = "Sensor 2 acel x=" + String(accelData.accelX) + 
+                         " y=" + String(accelData.accelY) + 
+                         " z=" + String(accelData.accelZ) +
+                         " mag x=" + String(magData.magX) + 
+                         " y=" + String(magData.magY) + 
+                         " z=" + String(magData.magZ);
+
+      // 4. Formatação do Peso (Apenas 1 agora)
+      String dadosPeso = "Carga 1 peso=" + String(peso);
+
+      // --- ENVIO PARA O PYTHON ---
+      String pacoteCompleto = dadosImu1 + " " + dadosImu2 + " " + dadosPeso + "\n";
+      
+      client.print(pacoteCompleto);
+      delay(50); 
+    }
+    
+    client.stop();
+    Serial.println("Cliente desconectado.");
+  }
+  else {
+    // Mantém a tara atualizada mesmo sem cliente conectado
+    LoadCell.update();
+    delay(10);
+  }
+}
