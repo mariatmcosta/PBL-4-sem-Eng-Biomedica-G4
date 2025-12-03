@@ -1,0 +1,92 @@
+#include <Wire.h>
+#include <FastIMU.h>
+#include <MadgwickAHRS.h>
+
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+// ------ IMUs ------
+MPU6500 imu1;   // Endereço 0x68
+MPU6500 imu2;   // Endereço 0x69
+
+Madgwick filter1;
+Madgwick filter2;
+
+calData calib = {0};
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Serial.println("Iniciando IMUs...");
+
+  // ------- IMU 1 (0x68) -------
+  if (imu1.init(calib, 0x68) != 0) {
+    Serial.println("Erro ao iniciar IMU 1 (0x68)");
+    while (1);
+  }
+
+  // ------- IMU 2 (0x69) -------
+  if (imu2.init(calib, 0x69) != 0) {
+    Serial.println("Erro ao iniciar IMU 2 (0x69)");
+    while (1);
+  }
+
+  filter1.begin(100);   // filtro a 100 Hz
+  filter2.begin(100);
+
+  Serial.println("IMUs prontas!");
+}
+
+void loop() {
+
+  // ----------- IMU 1 -----------
+  imu1.update();
+
+  AccelData a1;
+  GyroData g1;
+
+  imu1.getAccel(&a1);
+  imu1.getGyro(&g1);
+
+  filter1.updateIMU(
+    g1.gyroX, g1.gyroY, g1.gyroZ,
+    a1.accelX, a1.accelY, a1.accelZ
+  );
+
+  float pitch1 = filter1.getPitch();
+  float roll1  = filter1.getRoll();
+  float yaw1   = filter1.getYaw();
+
+  // ----------- IMU 2 -----------
+  imu2.update();
+
+  AccelData a2;
+  GyroData g2;
+
+  imu2.getAccel(&a2);
+  imu2.getGyro(&g2);
+
+  filter2.updateIMU(
+    g2.gyroX, g2.gyroY, g2.gyroZ,
+    a2.accelX, a2.accelY, a2.accelZ
+  );
+
+  float pitch2 = filter2.getPitch();
+  float roll2  = filter2.getRoll();
+  float yaw2   = filter2.getYaw();
+
+  // ---------- PRINT ----------
+  Serial.print("IMU1 | PITCH: "); Serial.print(pitch1, 2);
+  Serial.print(" ROLL: ");        Serial.print(roll1, 2);
+  Serial.print(" YAW: ");         Serial.print(yaw1, 2);
+
+  Serial.print("   ||   ");
+
+  Serial.print("IMU2 | PITCH: "); Serial.print(pitch2, 2);
+  Serial.print(" ROLL: ");        Serial.print(roll2, 2);
+  Serial.print(" YAW: ");         Serial.println(yaw2, 2);
+
+  delay(10); // ~100 Hz
+}
