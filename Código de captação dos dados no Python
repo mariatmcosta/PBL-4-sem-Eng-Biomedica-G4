@@ -1,0 +1,194 @@
+import socket
+import math
+from filterpy.kalman import KalmanFilter
+import numpy as np
+import pandas as pd
+import os
+import re
+from datetime import datetime
+
+# --- CONFIGURAÇÕES ---
+esp32_ip = "172.20.10.2"  # SEU IP
+esp32_port = 12345
+csv_file = "sensor_data_final.csv"
+
+# --- CONFIGURAÇÕES DE TARA (PESO) ---
+TARE_SAMPLES = 50
+tare_buffer = []
+tare_value = 0.0
+is_tared = False
+
+# --- CONFIGURAÇÕES DE OFFSET (ÂNGULO) ---
+# Se quiser que a posição inicial seja considerada "0 graus", mudaremos isso dinamicamente
+angle_offset = 0.0
+is_angle_zeroed = False
+ANGLE_SAMPLES = 50
+angle_buffer = []
+
+# --- COLUNAS DO ARQUIVO ---
+columns = [
+    "Timestamp", 
+    "Angulo Canela (S1)", 
+    "Angulo Pe (S2)", 
+    "Dorsiflexao", 
+    "Peso (kg)"
+]
+
+data_list = []
+
+# --- FUNÇÕES DE PARSING E CÁLCULO ---
+
+def parse_sensor_data(raw_data):
+    """ Extrai aceleração e peso do pacote de string do Arduino. """
+    data = {}
+    try:
+        # Regex para IMUs
+        mpu_pattern = r"Sensor (\d+) acel x=([\d.-]+) y=([\d.-]+) z=([\d.-]+)"
+        for match in re.finditer(mpu_pattern, raw_data):
+            sensor_id = match.group(1)
+            ax, ay, az = float(match.group(2)), float(match.group(3)), float(match.group(4))
+            
+            data[f"Sensor {sensor_id}"] = {
+                "accel": {"x": ax, "y": ay, "z": az}
+            }
+
+        # Regex para Célula de Carga
+        carga_pattern = r"Carga (\d+) peso=([\d.-]+)"
+        for match in re.finditer(carga_pattern, raw_data):
+            carga_id = match.group(1)
+            peso = float(match.group(2))
+            data[f"Carga {carga_id}"] = peso
+
+    except Exception as e:
+        print(f"Erro ao processar regex: {e}")
+    return data
+
+def calculate_planar_angle(accel):
+    """
+    Calcula o ângulo no plano XY usando arcotangente.
+    Ideal para sensores montados na lateral da perna.
+    """
+    x, y = accel["x"], accel["y"]
+    
+    # Calcula o ângulo do vetor gravidade
+    # Se o movimento estiver invertido (subindo quando desce), troque x e y de lugar aqui:
+    # rad = math.atan2(x, y) 
+    rad = math.atan2(y, x)
+    deg = math.degrees(rad)
+    
+    return deg
+
+def normalize_angle_diff(angle):
+    """ Mantém a diferença entre -180 e 180 para evitar saltos numéricos. """
+    while angle <= -180: angle += 360
+    while angle > 180: angle -= 360
+    return angle
+
+def init_kalman_1d():
+    """ Filtro de Kalman simples para 1 valor. """
+    kf = KalmanFilter(dim_x=1, dim_z=1)
+    kf.x = np.zeros(1)       # Estado inicial
+    kf.F = np.array([[1.]])  # Função de transição
+    kf.H = np.array([[1.]])  # Função de medição
+    kf.P *= 10               # Covariância inicial
+    kf.R = np.array([[0.1]]) # Ruído de medição (Aumente se o sensor tremer muito)
+    kf.Q = np.array([[0.01]])# Ruído do processo
+    return kf
+
+# --- LOOP PRINCIPAL ---
+try:
+    print(f"Conectando ao ESP32 em {esp32_ip}...")
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.settimeout(5.0)
+    client_socket.connect((esp32_ip, esp32_port))
+    client_socket.settimeout(None)
+    print("Conectado! Mantenha a perna parada e balança vazia para calibração...")
+
+    # Inicializa filtros (1 para cada sensor + 1 para peso)
+    kalman_s1 = init_kalman_1d() # Sensor 1 (Canela)
+    kalman_s2 = init_kalman_1d() # Sensor 2 (Pé)
+    kalman_c1 = init_kalman_1d() # Peso
+
+    while True:
+        try:
+            raw_data = client_socket.recv(4096).decode('utf-8').strip()
+        except:
+            break
+            
+        if raw_data:
+            sensors = parse_sensor_data(raw_data)
+
+            if ("Sensor 1" in sensors and "Sensor 2" in sensors and "Carga 1" in sensors):
+                
+                # 1. PROCESSAMENTO SENSOR 1 (Canela)
+                raw_ang_s1 = calculate_planar_angle(sensors["Sensor 1"]["accel"])
+                kalman_s1.predict()
+                kalman_s1.update(raw_ang_s1)
+                ang_s1 = kalman_s1.x[0]
+
+                # 2. PROCESSAMENTO SENSOR 2 (Pé)
+                raw_ang_s2 = calculate_planar_angle(sensors["Sensor 2"]["accel"])
+                kalman_s2.predict()
+                kalman_s2.update(raw_ang_s2)
+                ang_s2 = kalman_s2.x[0]
+
+                # 3. CÁLCULO DA DORSIFLEXÃO BRUTA
+                dorsiflexion_raw = ang_s2 - ang_s1
+                dorsiflexion_raw = normalize_angle_diff(dorsiflexion_raw)
+
+                # 4. PROCESSAMENTO DE PESO
+                kalman_c1.predict()
+                kalman_c1.update(sensors["Carga 1"])
+                w1_raw = kalman_c1.x[0]
+                
+                # === LÓGICA DE CALIBRAÇÃO (TARA + ZERO ANGULO) ===
+                if not is_tared or not is_angle_zeroed:
+                    # Calibra Peso
+                    tare_buffer.append(w1_raw)
+                    # Calibra Ângulo (Define a posição atual como 0 graus)
+                    angle_buffer.append(dorsiflexion_raw)
+                    
+                    print(f">> Calibrando... {len(tare_buffer)}/{TARE_SAMPLES}")
+                    
+                    if len(tare_buffer) >= TARE_SAMPLES:
+                        tare_value = np.mean(tare_buffer)
+                        angle_offset = np.mean(angle_buffer)
+                        
+                        is_tared = True
+                        is_angle_zeroed = True
+                        print(f"\n>>> CALIBRADO! Tara: {tare_value:.2f}kg | Zero Angular: {angle_offset:.1f}° <<<\n")
+                        tare_buffer = []
+                        angle_buffer = []
+                    continue 
+
+                # Aplica Calibrações
+                w1_final = w1_raw - tare_value
+                dorsiflexion_final = dorsiflexion_raw - angle_offset
+                dorsiflexion_final = normalize_angle_diff(dorsiflexion_final)
+
+                # --- EXIBIÇÃO ---
+                print(f"S1 (Canela): {ang_s1:.1f}° | S2 (Pé): {ang_s2:.1f}°")
+                print(f"DORSIFLEXÃO: {dorsiflexion_final:.2f}°")
+                print(f"PESO: {w1_final:.2f} kg")
+                print("-" * 30)
+
+                data_list.append({
+                    "Timestamp": datetime.now(),
+                    "Angulo Canela (S1)": ang_s1,
+                    "Angulo Pe (S2)": ang_s2,
+                    "Dorsiflexao": dorsiflexion_final,
+                    "Peso (kg)": w1_final
+                })
+
+except KeyboardInterrupt:
+    print("\nSalvando dados...")
+
+finally:
+    if 'client_socket' in locals(): client_socket.close()
+    if data_list:
+        df = pd.DataFrame(data_list, columns=columns)
+        if not os.path.exists(csv_file):
+            df.to_csv(csv_file, index=False)
+        else:
+            df.to_csv(csv_file, mode="a", header=False, index=False)
+        print(f"Dados salvos em {csv_file}")
