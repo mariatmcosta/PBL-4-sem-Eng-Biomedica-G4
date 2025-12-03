@@ -1,0 +1,166 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt, find_peaks, welch, detrend, savgol_filter
+
+# --------------------------------------------------------------
+# FUNÇÃO PRINCIPAL DE PROCESSAMENTO DOS CSVs
+# --------------------------------------------------------------
+def process_csv(filename):
+    df = pd.read_csv(filename, parse_dates=['Timestamp'])
+    df = df.sort_values("Timestamp").reset_index(drop=True)
+
+    # Tempo normalizado (começando em zero)
+    t_norm = (df["Timestamp"] - df["Timestamp"].iloc[0]).dt.total_seconds().values
+
+    dt = df['Timestamp'].diff().dt.total_seconds().mean()
+    fs = 1 / dt
+
+    force = df['Peso (kg)'].values
+    ankle = df['Dorsiflexao'].values
+
+    # Remoção de tendência
+    force_detrended = detrend(force)
+    ankle_detrended = detrend(ankle)
+
+    # Suavização
+    force_smoothed = savgol_filter(force_detrended, 21, 3)
+    ankle_smoothed = savgol_filter(ankle_detrended, 21, 3)
+
+    # Filtro passa-banda
+    lowcut = 0.3
+    highcut = fs * 0.45
+    b, a = butter(4, [lowcut, highcut], btype='band', fs=fs)
+
+    force_f = filtfilt(b, a, force_smoothed)
+    ankle_f = filtfilt(b, a, ankle_smoothed)
+
+    # Detecção de picos
+    peaks, _ = find_peaks(force_f, height=np.mean(force_f), distance=fs*0.4)
+
+    # FFT
+    N = len(force_f)
+    freqs = np.fft.rfftfreq(N, d=dt)
+    fft_force = np.abs(np.fft.rfft(force_f - np.mean(force_f)))
+    fft_ankle = np.abs(np.fft.rfft(ankle_f - np.mean(ankle_f)))
+
+    # Normalização por ciclo da marcha
+    def normalize_cycles(signal, peaks, n_points=100):
+        cycles = []
+        for i in range(len(peaks) - 1):
+            seg = signal[peaks[i]:peaks[i+1]]
+
+            if len(seg) < 5:
+                continue
+
+            x_old = np.linspace(0, 100, len(seg))
+            x_new = np.linspace(0, 100, n_points)
+            cycles.append(np.interp(x_new, x_old, seg))
+
+        return np.array(cycles)
+
+    force_cycles = normalize_cycles(force_f, peaks)
+    ankle_cycles = normalize_cycles(ankle_f, peaks)
+
+    force_mean = np.mean(force_cycles, axis=0)
+    force_std = np.std(force_cycles, axis=0)
+    ankle_mean = np.mean(ankle_cycles, axis=0)
+    ankle_std = np.std(ankle_cycles, axis=0)
+
+    # Reconstrução da passada
+    num_passadas = len(peaks) - 1
+    reconstructed_force = np.tile(force_mean, num_passadas)
+    reconstructed_ankle = np.tile(ankle_mean, num_passadas)
+
+    if num_passadas > 1:
+        cycle_duration = (df['Timestamp'][peaks[1]] - df['Timestamp'][peaks[0]]).total_seconds()
+    else:
+        cycle_duration = 1.0
+
+    t_recon = np.linspace(0, num_passadas * cycle_duration, len(reconstructed_force))
+
+    return {
+        "df": df,
+        "t_norm": t_norm,
+        "force_f": force_f,
+        "ankle_f": ankle_f,
+        "freqs": freqs,
+        "fft_force": fft_force,
+        "fft_ankle": fft_ankle,
+        "force_mean": force_mean,
+        "force_std": force_std,
+        "ankle_mean": ankle_mean,
+        "ankle_std": ankle_std,
+        "t_recon": t_recon,
+        "reconstructed_force": reconstructed_force,
+        "reconstructed_ankle": reconstructed_ankle
+    }
+
+
+# --------------------------------------------------------------
+# PROCESSA OS DOIS CSVs
+# --------------------------------------------------------------
+csv1 = "sofia_dorsi.csv"
+csv2 = "rosane_dorsi.csv"
+
+data1 = process_csv(csv1)
+data2 = process_csv(csv2)
+
+
+# --------------------------------------------------------------
+# GRÁFICOS COMPARATIVOS — OS MESMOS 5 DO SEU SCRIPT ORIGINAL
+# --------------------------------------------------------------
+
+fig, axs = plt.subplots(5, 1, figsize=(14, 22))
+
+# --- 1) Força Bruta ---
+axs[0].plot(data1["t_norm"], data1["df"]['Peso (kg)'], label="CSV1")
+axs[0].plot(data2["t_norm"], data2["df"]['Peso (kg)'], label="CSV2")
+axs[0].set_title("1. Força Bruta (dados do CSV)")
+axs[0].set_xlabel("Tempo (s)")
+axs[0].legend()
+
+# --- 2) Dorsiflexão filtrada ---
+axs[1].plot(data1["t_norm"], data1["ankle_f"], label="CSV1")
+axs[1].plot(data2["t_norm"], data2["ankle_f"], label="CSV2")
+axs[1].set_title("2. Dorsiflexão filtrada")
+axs[1].set_xlabel("Tempo (s)")
+axs[1].legend()
+
+# --- 3) FFT ---
+axs[2].plot(data1["freqs"], data1["fft_force"], label=f"Força - CSV1")
+axs[2].plot(data2["freqs"], data2["fft_force"], label=f"Força - CSV2")
+axs[2].plot(data1["freqs"], data1["fft_ankle"], label=f"Dorsiflexão - CSV1")
+axs[2].plot(data2["freqs"], data2["fft_ankle"], label=f"Dorsiflexão - CSV2")
+axs[2].set_xlim(0, 15)
+axs[2].set_title("3. FFT da Força e Dorsiflexão")
+axs[2].set_xlabel("Frequência (Hz)")
+axs[2].legend()
+
+# --- 4) Ciclo médio ---
+x = np.linspace(0, 100, len(data1["force_mean"]))
+
+axs[3].plot(x, data1["force_mean"], label=f"Força média - CSV1")
+axs[3].plot(x, data2["force_mean"], label=f"Força média - CSV2")
+
+axs[3].plot(x, data1["ankle_mean"], label=f"Dorsiflexão média - CSV1")
+axs[3].plot(x, data2["ankle_mean"], label=f"Dorsiflexão média - CSV2")
+
+axs[3].set_title("4. Ciclo Médio Normalizado (0–100% do passo)")
+axs[3].set_xlabel("% do ciclo")
+axs[3].legend()
+
+# --- 5) Reconstrução da passada ---
+axs[4].plot(data1["t_recon"], data1["reconstructed_force"], label=f"Força - CSV1", alpha=0.8)
+axs[4].plot(data1["t_recon"], data1["reconstructed_ankle"], label=f"Dorsiflexão - CSV1", alpha=0.8)
+
+axs[4].plot(data2["t_recon"], data2["reconstructed_force"], label=f"Força - {csv2}", alpha=0.8)
+axs[4].plot(data2["t_recon"], data2["reconstructed_ankle"], label=f"Dorsiflexão - {csv2}", alpha=0.8)
+
+axs[4].set_title("5. Reconstrução da passada")
+axs[4].set_xlabel("Tempo artificial (s)")
+axs[4].legend()
+
+plt.tight_layout()
+plt.savefig("comparacao_marcha.png", dpi=300)
+plt.show()
